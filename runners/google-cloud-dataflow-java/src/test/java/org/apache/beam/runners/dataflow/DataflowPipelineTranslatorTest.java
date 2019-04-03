@@ -84,7 +84,7 @@ import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Sum;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
+import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
@@ -775,7 +775,7 @@ public class DataflowPipelineTranslatorTest implements Serializable {
         PTransformTranslation.SPLITTABLE_PROCESS_KEYED_URN, spkTransform.getSpec().getUrn());
     ParDoPayload payload = ParDoPayload.parseFrom(spkTransform.getSpec().getPayload());
     assertThat(
-        ParDoTranslation.doFnAndMainOutputTagFromProto(payload.getDoFn()).getDoFn(),
+        ParDoTranslation.doFnWithExecutionInformationFromProto(payload.getDoFn()).getDoFn(),
         instanceOf(TestSplittableFn.class));
     assertThat(
         components.getCoder(payload.getRestrictionCoderId()), instanceOf(SerializableCoder.class));
@@ -975,7 +975,7 @@ public class DataflowPipelineTranslatorTest implements Serializable {
 
   private static class TestSplittableFn extends DoFn<String, Integer> {
     @ProcessElement
-    public void process(ProcessContext c, OffsetRangeTracker tracker) {
+    public void process(ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
       // noop
     }
 

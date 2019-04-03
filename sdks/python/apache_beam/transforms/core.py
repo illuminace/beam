@@ -203,6 +203,7 @@ class RestrictionProvider(object):
   Optionally, ``RestrictionProvider`` may override default implementations of
   following methods.
   * restriction_coder()
+  * restriction_size()
   * split()
 
   ** Pausing and resuming processing of an element **
@@ -270,6 +271,14 @@ class RestrictionProvider(object):
     """
     return coders.registry.get_coder(object)
 
+  def restriction_size(self, element, restriction):
+    """Returns the size of an element with respect to the given element.
+
+    By default, asks a newly-created restriction tracker for the default size
+    of the restriction.
+    """
+    return self.create_tracker(restriction).default_size()
+
 
 def get_function_arguments(obj, func):
   """Return the function arguments based on the name provided. If they have
@@ -326,6 +335,32 @@ class _TimerDoFnParam(_DoFnParam):
     self.param_id = 'TimerParam(%s)' % timer_spec.name
 
 
+class _BundleFinalizerParam(_DoFnParam):
+  """Bundle Finalization DoFn parameter."""
+
+  def __init__(self):
+    self._callbacks = []
+    self.param_id = "FinalizeBundle"
+
+  def register(self, callback):
+    self._callbacks.append(callback)
+
+  # Log errors when calling callback to make sure all callbacks get called
+  # though there are errors. And errors should not fail pipeline.
+  def finalize_bundle(self):
+    for callback in self._callbacks:
+      try:
+        callback()
+      except Exception as e:
+        logging.warn("Got exception from finalization call: %s", e)
+
+  def has_callbacks(self):
+    return len(self._callbacks) > 0
+
+  def reset(self):
+    del self._callbacks[:]
+
+
 class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
   """A function object used by a transform with custom processing.
 
@@ -344,9 +379,11 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
   TimestampParam = _DoFnParam('TimestampParam')
   WindowParam = _DoFnParam('WindowParam')
   WatermarkReporterParam = _DoFnParam('WatermarkReporterParam')
+  BundleFinalizerParam = _BundleFinalizerParam
 
   DoFnProcessParams = [ElementParam, SideInputParam, TimestampParam,
-                       WindowParam, WatermarkReporterParam]
+                       WindowParam, WatermarkReporterParam,
+                       BundleFinalizerParam]
 
   # Parameters to access state and timers.  Not restricted to use only in the
   # .process() method. Usage: DoFn.StateParam(state_spec),
@@ -370,7 +407,7 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     If specified, following default arguments are used by the ``DoFnRunner`` to
     be able to pass the parameters correctly.
 
-    ``DoFn.ElementParam``: element to be processed.
+    ``DoFn.ElementParam``: element to be processed, should not be mutated.
     ``DoFn.SideInputParam``: a side input that may be used when processing.
     ``DoFn.TimestampParam``: timestamp of the input element.
     ``DoFn.WindowParam``: ``Window`` the input element belongs to.
@@ -569,20 +606,21 @@ class CombineFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     """
     raise NotImplementedError(str(self))
 
-  def add_input(self, accumulator, element, *args, **kwargs):
+  def add_input(self, mutable_accumulator, element, *args, **kwargs):
     """Return result of folding element into accumulator.
 
     CombineFn implementors must override add_input.
 
     Args:
-      accumulator: the current accumulator
-      element: the element to add
+      mutable_accumulator: the current accumulator,
+        may be modified and returned for efficiency
+      element: the element to add, should not be mutated
       *args: Additional arguments and side inputs.
       **kwargs: Additional arguments and side inputs.
     """
     raise NotImplementedError(str(self))
 
-  def add_inputs(self, accumulator, elements, *args, **kwargs):
+  def add_inputs(self, mutable_accumulator, elements, *args, **kwargs):
     """Returns the result of folding each element in elements into accumulator.
 
     This is provided in case the implementation affords more efficient
@@ -590,21 +628,27 @@ class CombineFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     over the inputs invoking add_input for each one.
 
     Args:
-      accumulator: the current accumulator
-      elements: the elements to add
+      mutable_accumulator: the current accumulator,
+        may be modified and returned for efficiency
+      elements: the elements to add, should not be mutated
       *args: Additional arguments and side inputs.
       **kwargs: Additional arguments and side inputs.
     """
     for element in elements:
-      accumulator = self.add_input(accumulator, element, *args, **kwargs)
-    return accumulator
+      mutable_accumulator =\
+        self.add_input(mutable_accumulator, element, *args, **kwargs)
+    return mutable_accumulator
 
   def merge_accumulators(self, accumulators, *args, **kwargs):
     """Returns the result of merging several accumulators
     to a single accumulator value.
 
     Args:
-      accumulators: the accumulators to merge
+      accumulators: the accumulators to merge.
+        Only the first accumulator may be modified and returned for efficiency;
+        the other accumulators should not be mutated, because they may be
+        shared with other code and mutating them could lead to incorrect
+        results or data corruption.
       *args: Additional arguments and side inputs.
       **kwargs: Additional arguments and side inputs.
     """
@@ -1029,6 +1073,14 @@ class ParDo(PTransformWithSideInputs):
         "expected instance of ParDo, but got %s" % self.__class__
     picked_pardo_fn_data = pickler.dumps(self._pardo_fn_data())
     state_specs, timer_specs = userstate.get_dofn_specs(self.fn)
+    from apache_beam.runners.common import DoFnSignature
+    is_splittable = DoFnSignature(self.fn).is_splittable_dofn()
+    if is_splittable:
+      restriction_coder = (
+          DoFnSignature(self.fn).get_restriction_provider().restriction_coder())
+      restriction_coder_id = context.coders.get_id(restriction_coder)
+    else:
+      restriction_coder_id = None
     return (
         common_urns.primitives.PAR_DO.urn,
         beam_runner_api_pb2.ParDoPayload(
@@ -1037,6 +1089,8 @@ class ParDo(PTransformWithSideInputs):
                 spec=beam_runner_api_pb2.FunctionSpec(
                     urn=python_urns.PICKLED_DOFN_INFO,
                     payload=picked_pardo_fn_data)),
+            splittable=is_splittable,
+            restriction_coder_id=restriction_coder_id,
             state_specs={spec.name: spec.to_runner_api(context)
                          for spec in state_specs},
             timer_specs={spec.name: spec.to_runner_api(context)
@@ -1208,7 +1262,7 @@ def Filter(fn, *args, **kwargs):  # pylint: disable=invalid-name
   if (output_hint is None
       and get_type_hints(wrapper).input_types
       and get_type_hints(wrapper).input_types[0]):
-    output_hint = get_type_hints(wrapper).input_types[0]
+    output_hint = get_type_hints(wrapper).input_types[0][0]
   if output_hint:
     get_type_hints(wrapper).set_output_types(typehints.Iterable[output_hint])
   # pylint: disable=protected-access
