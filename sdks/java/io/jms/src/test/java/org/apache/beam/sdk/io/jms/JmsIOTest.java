@@ -310,13 +310,7 @@ public class JmsIOTest {
       assertTrue(reader.advance());
     }
 
-    // the messages are still pending in the queue (no ACK yet)
-    assertEquals(10, count(QUEUE));
-
-    // we finalize the checkpoint
-    reader.getCheckpointMark().finalizeCheckpoint();
-
-    // the checkpoint finalize ack the messages, and so they are not pending in the queue anymore
+    // the 4 read messages were auto-ACKed
     assertEquals(6, count(QUEUE));
 
     // we read the 6 pending messages
@@ -324,12 +318,7 @@ public class JmsIOTest {
       assertTrue(reader.advance());
     }
 
-    // still 6 pending messages as we didn't finalize the checkpoint
-    assertEquals(6, count(QUEUE));
-
-    // we finalize the checkpoint: no more message in the queue
-    reader.getCheckpointMark().finalizeCheckpoint();
-
+    // the remaining messages were auto-ACK'd
     assertEquals(0, count(QUEUE));
   }
 
@@ -381,8 +370,8 @@ public class JmsIOTest {
       assertTrue(reader.advance());
     }
 
-    // the messages are still pending in the queue (no ACK yet)
-    assertEquals(messagesToProcess, count(QUEUE));
+    // the messages that have been read have also been ACK'd
+    assertEquals(messagesToProcess/2, count(QUEUE));
 
     // we finalize the checkpoint for the already-processed messages while simultaneously consuming
     // the remainder of
