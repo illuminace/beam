@@ -488,7 +488,7 @@ public class JmsIO {
       }
 
       try {
-        this.session = this.connection.createSession(false, Session.CLIENT_ACKNOWLEDGE);
+        this.session = this.connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
       } catch (Exception e) {
         throw new IOException("Error creating JMS session", e);
       }
